@@ -1,0 +1,15 @@
+{
+  "name": "hik",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "luxon": "^3.7.1",
+    "sqlite3": "^5.1.7"
+  }
+}
