@@ -180,43 +180,78 @@ class HikvisionParser {
     return mp4File;
   }
 
-  async extractAllSegments({ from = undefined, to = undefined /* [from, to) */, targetPath = path.join('.', 'extracted'), parallel = 8, replace = true } = {}) {
+  async extractAllSegments({
+    from = undefined,
+    to = undefined /* [from, to) */,
+    targetPath = path.join('.', 'extracted'),
+    parallel = 8,
+    replace = true,
+    mergeDays = false,
+    mergeParameters,
+  } = {}) {
     const segmentsToBeProcessed = from && to ? this.segments.filter((segment) => segment.startTime >= from && segment.startTime < to) : this.segments;
     console.log(`${segmentsToBeProcessed.length} of ${this.segments.length} will be extracted`);
+    const segmentsByDay = this.getSegmentsByDay(segmentsToBeProcessed, (segment) => segment.startTime.slice(0, 10)); // YYYY-MM-DD
     let currentSegmentIndex = 0;
 
     const ffmpegLogPath = path.join('.', `ffmpeg-${new Date().toISOString().replace(/:/g, '-')}.log`);
     const ffmpegLogFileHandle = await fsPromises.open(ffmpegLogPath, 'a');
 
-    const Worker = async (workerIndex) => {
-      while (currentSegmentIndex < segmentsToBeProcessed.length) {
-        const processingSegmentIndex = currentSegmentIndex;
-        const processingSegmentNumber = currentSegmentIndex + 1;
-        const workerNumber = workerIndex + 1;
-        const currentSegment = segmentsToBeProcessed[processingSegmentIndex];
-        currentSegmentIndex += 1;
-        const logPrefix = `[${new Date().toISOString()}; Worker Number: ${`${workerNumber}/${parallel}`.padStart(2, '0')}; Segment Number: ${processingSegmentNumber}; Segment Date: ${currentSegment.startTime}]: `;
-        console.log(`${logPrefix}Processing ${processingSegmentNumber}/${segmentsToBeProcessed.length}`);
-        const ffmpegLogCallback = (data) =>
-          ffmpegLogFileHandle.write(
-            `${data
-              .split('\n')
-              .map((line) => `${logPrefix}${line}`)
-              .join('\n')}\n`,
-          );
+    for (const dayKey of Object.keys(segmentsByDay).sort()) {
+      console.log(`Processing day ${dayKey}`);
+      const segmentsInDay = segmentsByDay[dayKey];
+      let currentSegmentInDayIndex = 0;
 
-        await this.extractSegmentMP4({ segment: currentSegment, targetPath, replace, logPrefix, ffmpegLogCallback });
+      const Worker = async (workerIndex) => {
+        while (currentSegmentInDayIndex < segmentsInDay.length) {
+          const processingSegmentIndex = currentSegmentInDayIndex;
+          const processingSegmentNumber = currentSegmentInDayIndex + 1;
+          const workerNumber = workerIndex + 1;
+          const currentSegment = segmentsInDay[processingSegmentIndex];
+          currentSegmentInDayIndex += 1;
+          currentSegmentIndex += 1;
+          const logPrefix = `[${new Date().toISOString()}; Worker Number: ${`${workerNumber}/${parallel}`.padStart(2, '0')}; Segment Number: ${processingSegmentNumber}; Segment Date: ${currentSegment.startTime}]: `;
+          console.log(
+            `${logPrefix}Processing ${dayKey} ${processingSegmentNumber}/${segmentsInDay.length} (${currentSegmentIndex}/${segmentsToBeProcessed.length})`,
+          );
+          const ffmpegLogCallback = (data) =>
+            ffmpegLogFileHandle.write(
+              `${data
+                .split('\n')
+                .map((line) => `${logPrefix}${line}`)
+                .join('\n')}\n`,
+            );
+
+          await this.extractSegmentMP4({ segment: currentSegment, targetPath, replace, logPrefix, ffmpegLogCallback });
+        }
+      };
+      await Promise.all(new Array(parallel).fill(undefined).map((_, workerIndex) => Worker(workerIndex)));
+      console.log(`Finished processing day ${dayKey}`);
+      if (mergeDays) {
+        console.log(`Merging day ${dayKey}...`);
+        await this.mergeSegmentsIntoDays({ segmentsDir: targetPath, removeSegmentsAfterMerging: true, ...mergeParameters });
       }
-    };
-    await Promise.all(new Array(parallel).fill(undefined).map((_, workerIndex) => Worker(workerIndex)));
+    }
 
     await ffmpegLogFileHandle.close();
+  }
+
+  getSegmentsByDay(segments, getSegmentDayPredicate) {
+    const segmentsByDay = {};
+    segments.forEach((segment) => {
+      const dayKey = getSegmentDayPredicate(segment);
+      if (!segmentsByDay[dayKey]) segmentsByDay[dayKey] = [];
+      const segmentsInDay = segmentsByDay[dayKey];
+      segmentsInDay.push(segment);
+    });
+    return segmentsByDay;
   }
 
   async mergeSegmentsIntoDays({
     segmentsDir = path.join('.', 'extracted'),
     daysDir = path.join('.', 'days'),
     fileSizeLimitInBytes = undefined /* 550*1024*1024 */,
+    removeSegmentsAfterMerging = false,
   } = {}) {
     const parseSegmentFileRange = (segmentName) => {
       const ranges = segmentName.slice(0, segmentName.indexOf('(')).trim();
@@ -260,19 +295,16 @@ class HikvisionParser {
         })),
     );
 
-    const segmentsPerDay = {};
-    segments.forEach((segment) => {
+    const segmentsByDay = this.getSegmentsByDay(segments, (segment) => {
       const range = parseSegmentFileRange(segment.name);
       const dayKey = range.startDate.toISOString().slice(0, 10); // YYYY-MM-DD
-      if (!segmentsPerDay[dayKey]) segmentsPerDay[dayKey] = [];
-      const segmentsInDay = segmentsPerDay[dayKey];
-      segmentsInDay.push(segment);
+      return dayKey;
     });
 
-    Object.keys(segmentsPerDay)
+    Object.keys(segmentsByDay)
       .sort()
       .forEach((dayKey) => {
-        const segmentsInDay = segmentsPerDay[dayKey].sort((a, b) => (a.name > b.name ? 1 : b.name > a.name ? -1 : 0));
+        const segmentsInDay = segmentsByDay[dayKey].sort((a, b) => (a.name > b.name ? 1 : b.name > a.name ? -1 : 0));
         const chunksWithSegments = fileSizeLimitInBytes ? chunkBySumLimit(segmentsInDay, (segment) => segment.size, fileSizeLimitInBytes) : [segmentsInDay];
         chunksWithSegments.forEach((chunkWithSegments) => {
           const concatFilePath = path.join('.', 'ffmpegConcatList.txt');
@@ -288,9 +320,26 @@ class HikvisionParser {
             `ffmpeg -f concat ${allowSpecialSymbolsInPath} -i "${concatFilePath}" -acodec copy -vcodec copy -y -f mp4 "${path.join(daysDir, mergedFileName)}"`,
           );
           fs.unlinkSync(concatFilePath);
+          if (removeSegmentsAfterMerging) {
+            chunkWithSegments.forEach((segment) => fs.unlinkSync(path.join(segmentsDir, segment.name)));
+          }
         });
       });
   }
+
+  logSourcesUsage = () => {
+    console.log(
+      JSON.stringify(
+        this.segments.reduce(
+          (statsPerSourceFileIndex, segment) => ({
+            ...statsPerSourceFileIndex,
+            [segment.sourceFileIndex]: (statsPerSourceFileIndex[segment.sourceFileIndex] || 0) + segment.data.endOffset - segment.data.startOffset,
+          }),
+          {},
+        ),
+      ),
+    );
+  };
 }
 
 module.exports = HikvisionParser;
