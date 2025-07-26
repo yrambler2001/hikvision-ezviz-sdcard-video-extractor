@@ -8,8 +8,5 @@
   "author": "",
   "license": "ISC",
   "description": "",
-  "dependencies": {
-    "luxon": "^3.7.1",
-    "sqlite3": "^5.1.7"
-  }
+  "dependencies": {}
 }
