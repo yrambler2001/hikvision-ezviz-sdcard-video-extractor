@@ -1,8 +1,9 @@
 const fs = require('fs');
+const fsPromises = require('fs/promises');
 const path = require('path');
-const { execSync } = require('child_process');
+const { exec } = require('child_process');
 
-class LibHikvision {
+class HikvisionParser {
   constructor(cameraDir) {
     this.cameraDir = cameraDir;
 
@@ -109,53 +110,96 @@ class LibHikvision {
     console.log(`Found ${this.segments.length} recordings`)
   }
 
-  readFileRange(path, offset, length) {
-    const fd = fs.openSync(path, 'r');
+  async readFileRange(path, startOffset, endOffset) {
+    const length = endOffset - startOffset;
+    const file = await fsPromises.open(path, 'r');
     const buffer = Buffer.alloc(length);
-    fs.readSync(fd, buffer, 0, length, offset);
-    fs.closeSync(fd);
+    try {
+      await file.read(buffer, 0, length, startOffset);
+    } finally {
+      await file.close();
+    }
     return buffer;
   }
 
-  extractSegmentMP4(index, targetPath = './extracted', replace = true) {
-    console.log(`Processing ${index} recording`);
-    fs.mkdirSync(targetPath, { recursive: true });
-    const seg = this.segments[index];
-    const sanitizeDatePath = (dateString) => dateString.replace(/:/g, '-');
-    const h265File = path.join(
+  async extractSegmentMP4({ segment, targetPath = './extracted', replace = true, ffmpegLogCallback = console.log, logPrefix = '' }) {
+    const existsAsync = async (path) => {
+      try {
+        await fsPromises.access(path, fs.constants.F_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    await fsPromises.mkdir(targetPath, { recursive: true });
+    const segmentFile = path.join(
       targetPath,
-      `${sanitizeDatePath(seg.startTime)} - ${sanitizeDatePath(seg.endTime)} (${seg.sourceFileIndexString}-${seg.sourceFileSegmentIndexString}).h265`,
+      `${this.sanitizeDatePath(segment.startTime)} - ${this.sanitizeDatePath(segment.endTime)} (${segment.sourceFileIndexString}-${segment.sourceFileSegmentIndexString}).mpeg`,
     );
-    const movFile = h265File.replace('.h265', '.mov');
+    const mp4File = segmentFile.replace('.mpeg', '.mp4');
 
-    if (fs.existsSync(movFile) && replace) fs.unlinkSync(movFile);
-    if (!fs.existsSync(movFile) || replace) {
-      const buffer = this.readFileRange(path.join(this.cameraDir, seg.sourceFileName), seg.data.startOffset, seg.data.endOffset);
-      fs.writeFileSync(h265File, buffer);
+    if ((await existsAsync(mp4File)) && replace) await fsPromises.unlink(mp4File);
+    if (!(await existsAsync(mp4File)) || replace) {
+      const buffer = await this.readFileRange(path.join(this.cameraDir, segment.sourceFileName), segment.data.startOffset, segment.data.endOffset);
+      await fsPromises.writeFile(segmentFile, buffer);
 
       const macOSQuickTimePlayerSupport = '-tag:v hvc1';
-      const cmd = `ffmpeg -i "${h265File}" -acodec copy -vcodec copy ${macOSQuickTimePlayerSupport} -f mov "${movFile}"`;
-      const ffmpegLogPath = path.join('.', 'ffmpeg.log');
-      const ffmpegLogFileHandle = fs.openSync(ffmpegLogPath, 'a');
+      const cmd = `ffmpeg -i "${segmentFile}" -acodec copy -vcodec copy ${macOSQuickTimePlayerSupport} -f mp4 "${mp4File}"`;
 
       try {
-        fs.writeSync(ffmpegLogFileHandle, `${cmd}\n`);
-        console.log('Running ffmpeg...');
-        execSync(cmd, { stdio: ['ignore', ffmpegLogFileHandle, ffmpegLogFileHandle] });
-        fs.unlinkSync(h265File);
-      } catch (err) {
-        console.error('Error caught while running ffmpeg. See ffmpeg.log');
+        ffmpegLogCallback(`${cmd}\n`);
+        console.log(`${logPrefix}Running ffmpeg...`);
+        await new Promise((res, rej) => {
+          exec(cmd, (error, stdout, stderr) => {
+            ffmpegLogCallback(`${stdout + stderr}\n`);
+            if (error) rej();
+            else res();
+          });
+        });
+        await fsPromises.unlink(segmentFile);
+      } catch (error) {
+        console.error(`${logPrefix}Error caught while running ffmpeg on ${segment.startTime} segment. See ffmpeg.log`, error || '');
       }
-      fs.closeSync(ffmpegLogFileHandle);
     }
-    return movFile;
+    return mp4File;
   }
 
-  extractAllSegments(targetPath = './extracted', replace = true) {
-    this.segments.forEach((segment, index) => {
-      this.extractSegmentMP4(index, targetPath, replace);
-    });
+  async extractAllSegments({ from, to /* [from, to) */, targetPath = './extracted', parallel = 8, replace = true }) {
+    const segmentsToBeProcessed = from && to ? this.segments.filter((segment) => segment.startTime >= from && segment.startTime < to) : this.segments;
+    console.log(`${segmentsToBeProcessed.length} of ${this.segments.length} will be extracted`);
+    let currentSegmentIndex = 0;
+
+    const ffmpegLogPath = path.join('.', `ffmpeg-${this.sanitizeDatePath(new Date().toISOString())}.log`);
+    const ffmpegLogFileHandle = await fsPromises.open(ffmpegLogPath, 'a');
+
+    const Worker = async (workerIndex) => {
+      while (currentSegmentIndex < segmentsToBeProcessed.length) {
+        const processingSegmentIndex = currentSegmentIndex;
+        const processingSegmentNumber = currentSegmentIndex + 1;
+        const workerNumber = workerIndex + 1;
+        const currentSegment = segmentsToBeProcessed[processingSegmentIndex];
+        currentSegmentIndex += 1;
+        const logPrefix = `[${new Date().toISOString()}; Worker Number: ${`${workerNumber}/${parallel}`.padStart(2, '0')}; Segment Number: ${processingSegmentNumber}; Segment Date: ${currentSegment.startTime}]: `;
+        console.log(`${logPrefix}Processing ${processingSegmentNumber}/${segmentsToBeProcessed.length}`);
+        const ffmpegLogCallback = (data) =>
+          ffmpegLogFileHandle.write(
+            `${data
+              .split('\n')
+              .map((line) => `${logPrefix}${line}`)
+              .join('\n')}\n`,
+          );
+
+        await this.extractSegmentMP4({ segment: currentSegment, targetPath, replace, logPrefix, ffmpegLogCallback });
+      }
+    };
+    await Promise.all(new Array(parallel).fill(undefined).map((_, workerIndex) => Worker(workerIndex)));
+
+    await ffmpegLogFileHandle.close();
+  }
+
+  sanitizeDatePath(dateString) {
+    return dateString.replace(/:/g, '-');
   }
 }
 
-module.exports = LibHikvision;
+module.exports = HikvisionParser;

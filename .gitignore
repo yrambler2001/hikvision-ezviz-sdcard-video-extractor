@@ -1,5 +1,4 @@
 node_modules
-tmp
-ttmmpp
-ffmpeg.log
+extracted*
+ffmpeg*.log
 .DS_Store
