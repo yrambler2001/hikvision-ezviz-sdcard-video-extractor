@@ -1,7 +1,7 @@
 const fs = require('fs');
 const fsPromises = require('fs/promises');
 const path = require('path');
-const { exec } = require('child_process');
+const { exec, execSync } = require('child_process');
 
 class HikvisionParser {
   constructor(cameraDir) {
@@ -60,6 +60,28 @@ class HikvisionParser {
     };
   }
 
+  timestampToString(timestamp) {
+    // Expected format: 1753542271
+    const date = new Date(timestamp * 1000);
+    const pad = (num) => String(num).padStart(2, '0');
+
+    // Expected format: "YYYY-MM-DD HH-mm-ss"
+    return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1 /* Months are zero-based */)}-${pad(date.getUTCDate())} ${pad(date.getUTCHours())}-${pad(date.getUTCMinutes())}-${pad(date.getUTCSeconds())}`;
+  }
+
+  stringToTimestamp(str) {
+    // Expected format: "YYYY-MM-DD HH-mm-ss"
+    const [datePart, timePart] = str.split(' ');
+    const [year, month, day] = datePart.split('-').map(Number);
+    const [hour, minute, second] = timePart.split('-').map(Number);
+
+    // Create Unix timestamp from UTC date
+    const date = Date.UTC(year, month - 1, day, hour, minute, second);
+
+    // Expected format: 1753542271
+    return date / 1000;
+  }
+
   processSegments() {
     const buffer = fs.readFileSync(this.indexPath);
     const startOffset = this.headerBufferLength + this.header.avFiles * this.file_len;
@@ -80,23 +102,17 @@ class HikvisionParser {
         const endTimeTimestamp = Number(data.endTime & dateMask);
         const firstKeyFrame_absTimeTimestamp = Number(data.firstKeyFrame_absTime & dateMask);
 
-        const timestampToString = (timestamp) => {
-          const date = new Date(timestamp * 1000);
-          const pad = (num) => String(num).padStart(2, '0');
-          return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1 /* Months are zero-based */)}-${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}`;
-        };
-
         const sourceFileIndexString = String(sourceFileIndex).padStart(5, '0');
         const sourceFileSegmentIndexString = String(sourceFileSegmentIndex).padStart(3, '0');
         const sourceFileName = `hiv${sourceFileIndexString}.mp4`;
         const segment = {
           data,
           startTimeTimestamp,
-          startTime: timestampToString(startTimeTimestamp),
+          startTime: this.timestampToString(startTimeTimestamp),
           endTimeTimestamp,
-          endTime: timestampToString(endTimeTimestamp),
+          endTime: this.timestampToString(endTimeTimestamp),
           firstKeyFrame_absTimeTimestamp,
-          firstKeyFrame_absTime: timestampToString(firstKeyFrame_absTimeTimestamp),
+          firstKeyFrame_absTime: this.timestampToString(firstKeyFrame_absTimeTimestamp),
           sourceFileIndex,
           sourceFileIndexString,
           sourceFileName,
@@ -134,7 +150,7 @@ class HikvisionParser {
     await fsPromises.mkdir(targetPath, { recursive: true });
     const segmentFile = path.join(
       targetPath,
-      `${this.sanitizeDatePath(segment.startTime)} - ${this.sanitizeDatePath(segment.endTime)} (${segment.sourceFileIndexString}-${segment.sourceFileSegmentIndexString}).mpeg`,
+      `${segment.startTime} - ${segment.endTime} (${segment.sourceFileIndexString}-${segment.sourceFileSegmentIndexString}).mpeg`,
     );
     const mp4File = segmentFile.replace('.mpeg', '.mp4');
 
@@ -144,7 +160,7 @@ class HikvisionParser {
       await fsPromises.writeFile(segmentFile, buffer);
 
       const macOSQuickTimePlayerSupport = '-tag:v hvc1';
-      const cmd = `ffmpeg -i "${segmentFile}" -acodec copy -vcodec copy ${macOSQuickTimePlayerSupport} -f mp4 "${mp4File}"`;
+      const cmd = `ffmpeg -i "${segmentFile}" -acodec copy -vcodec copy ${macOSQuickTimePlayerSupport} -y -f mp4 "${mp4File}"`;
 
       try {
         ffmpegLogCallback(`${cmd}\n`);
@@ -164,12 +180,12 @@ class HikvisionParser {
     return mp4File;
   }
 
-  async extractAllSegments({ from, to /* [from, to) */, targetPath = './extracted', parallel = 8, replace = true }) {
+  async extractAllSegments({ from = undefined, to = undefined /* [from, to) */, targetPath = path.join('.', 'extracted'), parallel = 8, replace = true } = {}) {
     const segmentsToBeProcessed = from && to ? this.segments.filter((segment) => segment.startTime >= from && segment.startTime < to) : this.segments;
     console.log(`${segmentsToBeProcessed.length} of ${this.segments.length} will be extracted`);
     let currentSegmentIndex = 0;
 
-    const ffmpegLogPath = path.join('.', `ffmpeg-${this.sanitizeDatePath(new Date().toISOString())}.log`);
+    const ffmpegLogPath = path.join('.', `ffmpeg-${new Date().toISOString().replace(/:/g, '-')}.log`);
     const ffmpegLogFileHandle = await fsPromises.open(ffmpegLogPath, 'a');
 
     const Worker = async (workerIndex) => {
@@ -197,8 +213,83 @@ class HikvisionParser {
     await ffmpegLogFileHandle.close();
   }
 
-  sanitizeDatePath(dateString) {
-    return dateString.replace(/:/g, '-');
+  async mergeSegmentsIntoDays({
+    segmentsDir = path.join('.', 'extracted'),
+    daysDir = path.join('.', 'days'),
+    fileSizeLimitInBytes = undefined /* 550*1024*1024 */,
+  } = {}) {
+    const parseSegmentFileRange = (segmentName) => {
+      const ranges = segmentName.slice(0, segmentName.indexOf('(')).trim();
+      const [startDateString, endDateString] = ranges.split(' - ');
+      const [startDate, endDate] = [startDateString, endDateString].map(this.stringToTimestamp).map((timestamp) => new Date(timestamp * 1000));
+      return { startDate, endDate };
+    };
+
+    function chunkBySumLimit(array, elementAccessor, maxChunkSum) {
+      const result = [];
+      let currentChunk = [];
+      let currentSum = 0;
+
+      for (const element of array) {
+        if (currentSum + elementAccessor(element) > maxChunkSum) {
+          if (currentChunk.length > 0) {
+            result.push(currentChunk);
+          }
+          currentChunk = [element];
+          currentSum = elementAccessor(element);
+        } else {
+          currentChunk.push(element);
+          currentSum += elementAccessor(element);
+        }
+      }
+
+      if (currentChunk.length > 0) {
+        result.push(currentChunk);
+      }
+
+      return result;
+    }
+
+    const segments = await Promise.all(
+      fs
+        .readdirSync(segmentsDir)
+        .filter((fileName) => fileName.endsWith('.mp4'))
+        .map(async (segmentName) => ({
+          name: segmentName,
+          size: (await fsPromises.stat(path.join(segmentsDir, segmentName))).size,
+        })),
+    );
+
+    const segmentsPerDay = {};
+    segments.forEach((segment) => {
+      const range = parseSegmentFileRange(segment.name);
+      const dayKey = range.startDate.toISOString().slice(0, 10); // YYYY-MM-DD
+      if (!segmentsPerDay[dayKey]) segmentsPerDay[dayKey] = [];
+      const segmentsInDay = segmentsPerDay[dayKey];
+      segmentsInDay.push(segment);
+    });
+
+    Object.keys(segmentsPerDay)
+      .sort()
+      .forEach((dayKey) => {
+        const segmentsInDay = segmentsPerDay[dayKey].sort((a, b) => (a.name > b.name ? 1 : b.name > a.name ? -1 : 0));
+        const chunksWithSegments = fileSizeLimitInBytes ? chunkBySumLimit(segmentsInDay, (segment) => segment.size, fileSizeLimitInBytes) : [segmentsInDay];
+        chunksWithSegments.forEach((chunkWithSegments) => {
+          const concatFilePath = path.join('.', 'ffmpegConcatList.txt');
+          fs.writeFileSync(concatFilePath, chunkWithSegments.map((segment) => `file '${path.join(segmentsDir, segment.name)}'`).join('\n'));
+
+          const firstSegmentRange = parseSegmentFileRange(chunkWithSegments[0].name);
+          const lastSegmentRange = parseSegmentFileRange(chunkWithSegments[chunkWithSegments.length - 1].name);
+          const mergedFileName = `${this.timestampToString(firstSegmentRange.startDate / 1000)} - ${this.timestampToString(lastSegmentRange.endDate / 1000)}.mp4`;
+
+          fs.mkdirSync(daysDir, { recursive: true });
+          const allowSpecialSymbolsInPath = '-safe 0';
+          execSync(
+            `ffmpeg -f concat ${allowSpecialSymbolsInPath} -i "${concatFilePath}" -acodec copy -vcodec copy -y -f mp4 "${path.join(daysDir, mergedFileName)}"`,
+          );
+          fs.unlinkSync(concatFilePath);
+        });
+      });
   }
 }
 

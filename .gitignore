@@ -2,3 +2,5 @@ node_modules
 extracted*
 ffmpeg*.log
 .DS_Store
+merged*
+ffmpegConcatList
