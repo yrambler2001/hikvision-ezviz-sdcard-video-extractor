@@ -4,4 +4,4 @@ ffmpeg*.log
 .DS_Store
 merged*
 ffmpegConcatList
-days
+days*

@@ -2,6 +2,7 @@ const fs = require('fs');
 const fsPromises = require('fs/promises');
 const path = require('path');
 const { exec, execSync } = require('child_process');
+const validateMpegPsStart = require('./mpegPsValidator');
 
 class HikvisionParser {
   constructor(cameraDir) {
@@ -18,6 +19,7 @@ class HikvisionParser {
 
     this.indexPath = path.join(this.cameraDir, 'index00.bin'); // index01.bin has the same segments
     this.header = this.getFileHeader();
+    this.outputContainer = 'mov'; // mp4 does not support pcm_alaw audio
   }
 
   getFileHeader() {
@@ -82,7 +84,8 @@ class HikvisionParser {
     return date / 1000;
   }
 
-  processSegments() {
+  async processSegments(check = true) {
+    let skippedSegments = 0;
     const buffer = fs.readFileSync(this.indexPath);
     const startOffset = this.headerBufferLength + this.header.avFiles * this.file_len;
     let offset = startOffset;
@@ -119,11 +122,21 @@ class HikvisionParser {
           sourceFileSegmentIndex,
           sourceFileSegmentIndexString,
         };
+        if (check) {
+          // case when segment is overwritten by newer segment
+          const data = await this.readFileRange(path.join(this.cameraDir, segment.sourceFileName), segment.data.startOffset, segment.data.startOffset + 4096);
+          segment.validationResult = validateMpegPsStart(data);
+          if (!segment.validationResult.valid) {
+            skippedSegments += 1;
+            continue;
+          }
+        }
         this.segments.push(segment);
       }
     }
     this.segments.sort((a, b) => a.startTimeTimestamp - b.startTimeTimestamp);
-    console.log(`Found ${this.segments.length} recordings`)
+    console.log(`Found ${this.segments.length} recordings`);
+    if (skippedSegments > 0) console.log(`Skipped ${skippedSegments} invalid recordings`);
   }
 
   async readFileRange(path, startOffset, endOffset) {
@@ -152,7 +165,7 @@ class HikvisionParser {
       targetPath,
       `${segment.startTime} - ${segment.endTime} (${segment.sourceFileIndexString}-${segment.sourceFileSegmentIndexString}).mpeg`,
     );
-    const mp4File = segmentFile.replace('.mpeg', '.mp4');
+    const mp4File = segmentFile.replace('.mpeg', `.${this.outputContainer}`);
 
     if ((await existsAsync(mp4File)) && replace) await fsPromises.unlink(mp4File);
     if (!(await existsAsync(mp4File)) || replace) {
@@ -160,7 +173,7 @@ class HikvisionParser {
       await fsPromises.writeFile(segmentFile, buffer);
 
       const macOSQuickTimePlayerSupport = '-tag:v hvc1';
-      const cmd = `ffmpeg -i "${segmentFile}" -acodec copy -vcodec copy ${macOSQuickTimePlayerSupport} -y -f mp4 "${mp4File}"`;
+      const cmd = `ffmpeg -i "${segmentFile}" -acodec copy -vcodec copy ${macOSQuickTimePlayerSupport} -y "${mp4File}"`;
 
       try {
         ffmpegLogCallback(`${cmd}\n`);
@@ -175,6 +188,13 @@ class HikvisionParser {
         await fsPromises.unlink(segmentFile);
       } catch (error) {
         console.error(`${logPrefix}Error caught while running ffmpeg on ${segment.startTime} segment. See ffmpeg.log`, error || '');
+        const statSize = await fsPromises.stat(`./${mp4File}`).catch(() => {
+          /* no file found */
+        });
+        if (statSize?.size === 0) {
+          // unlink empty-sized failed to process segments
+          await fsPromises.unlink(`./${mp4File}`);
+        }
       }
     }
     return mp4File;
@@ -288,7 +308,7 @@ class HikvisionParser {
     const segments = await Promise.all(
       fs
         .readdirSync(segmentsDir)
-        .filter((fileName) => fileName.endsWith('.mp4'))
+        .filter((fileName) => fileName.endsWith(`.${this.outputContainer}`))
         .map(async (segmentName) => ({
           name: segmentName,
           size: (await fsPromises.stat(path.join(segmentsDir, segmentName))).size,
@@ -312,13 +332,11 @@ class HikvisionParser {
 
           const firstSegmentRange = parseSegmentFileRange(chunkWithSegments[0].name);
           const lastSegmentRange = parseSegmentFileRange(chunkWithSegments[chunkWithSegments.length - 1].name);
-          const mergedFileName = `${this.timestampToString(firstSegmentRange.startDate / 1000)} - ${this.timestampToString(lastSegmentRange.endDate / 1000)}.mp4`;
+          const mergedFileName = `${this.timestampToString(firstSegmentRange.startDate / 1000)} - ${this.timestampToString(lastSegmentRange.endDate / 1000)}.${this.outputContainer}`;
 
           fs.mkdirSync(daysDir, { recursive: true });
           const allowSpecialSymbolsInPath = '-safe 0';
-          execSync(
-            `ffmpeg -f concat ${allowSpecialSymbolsInPath} -i "${concatFilePath}" -acodec copy -vcodec copy -y -f mp4 "${path.join(daysDir, mergedFileName)}"`,
-          );
+          execSync(`ffmpeg -f concat ${allowSpecialSymbolsInPath} -i "${concatFilePath}" -acodec copy -vcodec copy -y "${path.join(daysDir, mergedFileName)}"`);
           fs.unlinkSync(concatFilePath);
           if (removeSegmentsAfterMerging) {
             chunkWithSegments.forEach((segment) => fs.unlinkSync(path.join(segmentsDir, segment.name)));
@@ -328,17 +346,22 @@ class HikvisionParser {
   }
 
   logSourcesUsage = () => {
-    console.log(
-      JSON.stringify(
-        this.segments.reduce(
-          (statsPerSourceFileIndex, segment) => ({
-            ...statsPerSourceFileIndex,
-            [segment.sourceFileIndex]: (statsPerSourceFileIndex[segment.sourceFileIndex] || 0) + segment.data.endOffset - segment.data.startOffset,
-          }),
-          {},
-        ),
-      ),
+    const statsPerSourceFile = this.segments.reduce(
+      (statsPerSourceFileIndex, segment) => ({
+        ...statsPerSourceFileIndex,
+        [segment.sourceFileIndex]: (statsPerSourceFileIndex[segment.sourceFileIndex] || 0) + segment.data.endOffset - segment.data.startOffset,
+      }),
+      {},
     );
+    console.log(JSON.stringify(statsPerSourceFile, null, 2));
+  };
+
+  logAvailableRecordings = () => {
+    const data = this.segments.map(
+      (segment, index) =>
+        `${index} ${segment.sourceFileName}: ${segment.startTime} - ${segment.endTime} (${`${segment.data.startOffset}`.padStart(9, '0')} - ${`${segment.data.endOffset}`.padStart(9, '0')})`,
+    );
+    console.log(JSON.stringify(data, null, 2));
   };
 }
 
