@@ -1,43 +1,46 @@
-This Node.js software can extract Hikvision/EZVIZ recorded videos out of sdcard and make it playable on Mac OS. No npm dependencies needed.
+# Hikvision SDCard Video Extractor (Node.js)
 
-Tested with Hikvision (EZVIZ) DS-2CD2443G2-IW-W v5.3.8 build 241123 and DS-2CD2443G0-IW v5.6.5 build 200316.
+This Node.js utility extracts playable video files from Hikvision/EZVIZ SD cards directly, without the need for re-encoding or external npm dependencies.
 
-[Node.js](https://nodejs.org) v20 or later is required.
+- ✅ **No npm dependencies**
+- ✅ **No re-encoding**
+- ✅ **Plays in QuickTime**
+- ✅ **Fast extraction**
+- ✅ **Optional: Merges recordings per day**
 
-[ffmpeg](https://ffmpeg.org) is required.
+---
 
-### Info:
+## ✅ Requirements
 
-On the Camera's sdcard there are these files:
+- [Node.js](https://nodejs.org) **v20 or later**
+- [FFmpeg](https://ffmpeg.org)
+
+Tested with:
+
+- **Hikvision DS-2CD2443G2-IW-W** (v5.3.8 build 241123)
+- **Hikvision DS-2CD2443G0-IW** (v5.6.5 build 200316)
+
+---
+
+## 📂 SD Card File Structure
+
+After formatting the SD card, the camera creates `hivXXXXX.mp4` files, each exactly **256MB**, and records video using a **round-robin** method.
+
+Example structure:
 
 ```
 hiv00000.mp4
 hiv00000.pic
 hiv00001.mp4
 hiv00001.pic
-hiv00002.mp4
-hiv00002.pic
-hiv00003.mp4
-hiv00003.pic
-hiv00004.mp4
-hiv00004.pic
-hiv00005.mp4
-hiv00005.pic
-hiv00006.mp4
-hiv00006.pic
-hiv00007.mp4
-hiv00007.pic
+...
 hiv00008.mp4
 hiv00008.pic
 hiv00009.mp4
 hiv00010.mp4
 hiv00011.mp4
 hiv00012.mp4
-hiv00013.mp4
-hiv00014.mp4
 ...
-hiv00463.mp4
-hiv00464.mp4
 hiv00465.mp4
 index00.bin
 index00p.bin
@@ -47,45 +50,52 @@ logCurFile.bin
 logMainFile.bin
 ```
 
-Each hivXXXXX file has a size of exactly 256 megabytes. After formatting the sdcard, the filesystem file allocation table is quickly filled with these 256 megabytes (filled with zeroes) files.
+Each `.mp4` contains multiple **MPEG-PS containers** with **HEVC (h.265)** video and **AAC** audio. Metadata (segment time, file location, offsets) is stored in `index00.bin` and `index01.bin` (same info in both files). (`index00p.bin` has Metadata about images.)
 
-Video is being streamed into hivXXXXX files with Round-robin algorithm. Each file has multiple MPEG-PS containers with HEVC and AAC streams. Camera knows start and end dates, file index, start and end addresses of each MPEG-PS container part (segment) within a file. Such info is stored in `index00.bin`. `index01.bin` has the same info about segments. `index00p.bin` has info about images.
+See `examples/` for sample index files.
 
-Example `index00.bin` files are in examples folder.
+---
 
-### This software
+## ⚙️ What This Tool Does
 
-1. Parses the `index00.bin` file (v2 & v3 versions are confirmed to work).
-1. Gets all segments.
-   1. Optionally: with a timeframe limit.
-1. Extracts segments into files.
-1. Changes the container into mov.
-1. Changes the HEVC codec id from hev1 to hvc1 to allow playing the video in QuickTime and other apps.
-1. No re-encoding of the video or audio makes:
-   1. the processing very fast,
-   1. video size smallest possible (for that quality),
-   1. video quality same as original.
-1. Optionally: Merges the segments within a day into a single file.
-   1. Optionally: ...into multiple files limited with specific filesize.
+1. Parses `index00.bin` (v2 & v3 supported).
+2. Retrieves all recording segments.
+   - Optionally filter by timeframe.
+3. Extracts segments into playable files.
+4. Converts containers to `.mov`.
+5. Changes HEVC codec ID from `hev1` ➝ `hvc1` for QuickTime support.
+6. **No re-encoding**:
+   - Fast processing
+   - Original video quality
+   - Minimal file size
+7. (Optional) Merges recordings per day.
+   - (Optional) Splits daily merges by max file size.
 
-### listRecordings.js
+---
 
-#### Setup
+## 📄 `listRecordings.js`
 
-1. Open the `listRecordings.js` file with a text editor.
-1. Update the `const folder = '/Users/User/Desktop/sdcard';` line with your folder.
+### 🔧 Setup
 
-#### Usage
+Edit the script and set your folder:
 
-`node ./listRecordings.js`
+```js
+const folder = "/Users/User/Desktop/sdcard";
+```
 
-List of recordings will be logged into the console.
+### ▶️ Run
 
-#### Output format
+```bash
+node listRecordings.js
+```
 
-"Recording index" "Recording source file": "Recording start date" - "Recording end date" ("Recording binary start offset within source file" - "Recording binary end offset within source file")
+### 📤 Output
 
-#### Sample output:
+```
+"index" "source file": "start date" - "end date" ("source start offset" - "source end offset")
+```
+
+Example:
 
 ```
 node ./listRecordings.js
@@ -96,49 +106,77 @@ Found 3402 recordings
   "2 hiv00000.mp4: 2025-07-12 21-35-37 - 2025-07-12 21-48-14 (084651520 - 264787587)",
   "3 hiv00001.mp4: 2025-07-12 21-48-14 - 2025-07-12 21-56-27 (000000000 - 116477676)",
   "4 hiv00001.mp4: 2025-07-12 21-56-31 - 2025-07-12 21-57-50 (116477952 - 134733060)",
-  "5 hiv00001.mp4: 2025-07-12 21-57-50 - 2025-07-12 22-01-52 (134733312 - 191241056)",
-  "6 hiv00001.mp4: 2025-07-12 22-01-56 - 2025-07-12 22-04-09 (191241216 - 221536620)",
-  "7 hiv00001.mp4: 2025-07-12 22-04-09 - 2025-07-12 22-07-14 (221536768 - 264468879)",
-  "8 hiv00002.mp4: 2025-07-12 22-07-14 - 2025-07-12 22-07-51 (000000000 - 008139132)",
-  "9 hiv00002.mp4: 2025-07-12 22-07-59 - 2025-07-12 22-10-04 (008139264 - 037196256)",
-  "10 hiv00002.mp4: 2025-07-12 22-10-04 - 2025-07-12 22-16-40 (037196288 - 133203788)",
-...
-...
 ...
 ```
 
-### extract.js
+---
 
-#### Setup
+## 📄 `extract.js`
 
-1. Open the `extract.js` file with a text editor.
-1. Update the `const folder = '/Users/User/Desktop/sdcard';` line with your folder.
-1. If you don't want to use default folder for extracted recordings (`./extracted`):
-   1. Update the `const targetFolder = undefined;` line with `const targetFolder = '/Users/User/Desktop/folder';`, use your folder path.
-1. If you want to use timeframe:
-   1. Replace the `const from = undefined;` line with `const from = '2020-01-01 00-00-00';`. Enter the needed date.
-   1. Replace the `const to = undefined;` line with `const to = '2026-01-01 00-00-00';`. Enter the needed date.
-1. If you want to merge videos into days:
-   1. Replace the `const mergeDays = false;` line with `const mergeDays = true;`.
-   1. If you want to make "merged into days videos" files no bigger than some size (if you want to split into smaller files):
-      1. Replace the `const mergeDaysFileSizeLimitInBytes = undefined;` line with `const mergeDaysFileSizeLimitInBytes = 550 * 1024 * 1024;`, where 550 is the size in megabytes. Keep in mind that single contiguous recording might be up to 256 megabytes, so if smaller size is entered, file still might be up to 256 megabytes.
-   1. Recordings will be in the `./days` folder
+### 🔧 Setup
 
-#### Usage
+Edit the following lines as needed:
 
-`node ./extract.js`
+- Source folder:
 
-Recordings will be in the targetFolder defined in extract, or in `./extracted` if no folder specified.
+  ```js
+  const folder = "/Users/User/Desktop/sdcard";
+  ```
 
-#### Recording file name format:
+- Output folder (optional):
 
-"Recording start date" - "Recording end date" ("Recording source file index"-"Recording index within source file").mov
+  To extract into default folder `./extracted`, keep `undefined`.
 
-#### Sample recording name:
+  ```js
+  const targetFolder = "/path/to/output";
+  ```
 
-`2025-07-12 22-10-04 - 2025-07-12 22-16-40 (00002-003).mov`
+- Timeframe filter (optional):
 
-#### Sample output:
+  To extract all recordings, keep `undefined`.
+
+  ```js
+  const from = "2025-07-01 00-00-00";
+  const to = "2025-07-31 23-59-59";
+  ```
+
+- Merge daily recordings (optional):
+
+  Recordings will be in the `./days` folder
+
+  ```js
+  const mergeDays = true;
+  ```
+
+  - Split daily merges by max file size (optional):
+
+    To skip splitting, keep `undefined`.
+
+    A single contiguous recording might be up to 256 megabytes, so if smaller size is entered, file still might be up to 256 megabytes.
+
+    ```js
+    const mergeDaysFileSizeLimitInBytes = 550 * 1024 * 1024; // 550 megabytes
+    ```
+
+### ▶️ Run
+
+```bash
+node extract.js
+```
+
+Extracted files will be saved in `targetFolder`, or in `./extracted` by default.
+
+### 🎥 Output Filename Format
+
+```bash
+2025-07-12 22-10-04 - 2025-07-12 22-16-40 (00002-003).mov
+```
+
+Format: `"start date" - "end date" ("source file" - "recording index")`
+
+---
+
+### Sample output:
 
 ```
 node ./extract.js
@@ -180,10 +218,10 @@ Processing day 2025-07-13
 ...
 ```
 
-#### Sample output when timeframe is active and mergeDays is enabled:
+### Sample output when timeframe is active and mergeDays is enabled:
 
 ```
-node ./extract,js
+node ./extract.js
 Found 3402 recordings
 65 of 3402 will be extracted
 Processing day 2025-07-12
@@ -212,37 +250,9 @@ Processing day 2025-07-12
 Finished processing day 2025-07-12
 Merging day 2025-07-12...
 ffmpeg version 7.1.1 Copyright (c) 2000-2025 the FFmpeg developers
-  built with Apple clang version 16.0.0 (clang-1600.0.26.6)
 ...
 ...
 ...
-Input #0, concat, from 'ffmpegConcatList.txt':
-  Duration: N/A, start: 0.000000, bitrate: 1903 kb/s
-  Stream #0:0: Video: hevc (Main) (hvc1 / 0x31637668), yuvj420p(pc, bt709), 2560x1440, 1871 kb/s, 23.39 fps, 25 tbr, 90k tbn
-      Metadata:
-        handler_name    : VideoHandler
-        vendor_id       : FFMP
-  Stream #0:1: Audio: aac (LC) (mp4a / 0x6134706D), 16000 Hz, mono, fltp, 31 kb/s
-      Metadata:
-        handler_name    : SoundHandler
-        vendor_id       : [0][0][0][0]
-Stream mapping:
-  Stream #0:0 -> #0:0 (copy)
-  Stream #0:1 -> #0:1 (copy)
-Output #0, mov, to 'days/2025-07-12 21-02-19 - 2025-07-12 22-10-04.mov':
-  Metadata:
-    encoder         : Lavf61.7.100
-  Stream #0:0: Video: hevc (Main) (hvc1 / 0x31637668), yuvj420p(pc, bt709), 2560x1440, q=2-31, 1871 kb/s, 23.39 fps, 25 tbr, 90k tbn
-      Metadata:
-        handler_name    : VideoHandler
-        vendor_id       : FFMP
-  Stream #0:1: Audio: aac (LC) (mp4a / 0x6134706D), 16000 Hz, mono, fltp, 31 kb/s
-      Metadata:
-        handler_name    : SoundHandler
-        vendor_id       : [0][0][0][0]
-Press [q] to stop, [?] for help
-[out#0/mov @ 0x14570d460] video:537433KiB audio:8935KiB subtitle:0KiB other streams:0KiB global headers:0KiB muxing overhead: 0.231826%
-frame=59817 fps=0.0 q=-1.0 Lsize=  547635KiB time=00:40:13.20 bitrate=1859.0kbits/s speed=4.93e+03x
 ffmpeg version 7.1.1 Copyright (c) 2000-2025 the FFmpeg developers
 ...
 ...
@@ -264,10 +274,12 @@ Merging day 2025-07-13...
 ffmpeg version 7.1.1 Copyright (c) 2000-2025 the FFmpeg developers
 ```
 
-### Credits
+---
 
-Based on Vasilis Koulis's Python code available at https://github.com/bkbilly/libHikvision,
+## 🙌 Credits
 
-that is based on Dave Hope's PHP code available at https://github.com/davehope/libHikvision,
+This project is based on:
 
-that is based on Alexey Ozerov's C++ code available at https://github.com/aloz77/hiktools,
+- [Vasilis Koulis's Python code](https://github.com/bkbilly/libHikvision)
+  - [Dave Hope's PHP code](https://github.com/davehope/libHikvision)
+    - [Alexey Ozerov's C++ code](https://github.com/aloz77/hiktools)
