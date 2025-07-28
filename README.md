@@ -1,6 +1,6 @@
 # Hikvision SDCard Video Extractor (Node.js)
 
-This Node.js utility extracts playable video files from Hikvision/EZVIZ SD cards directly, without the need for re-encoding or external npm dependencies.
+This Node.js utility extracts playable video files from Hikvision/EZVIZ SD cards directly, without the need for re-encoding or external npm dependencies. Apple QuickTime support.
 
 - ✅ **No npm dependencies**
 - ✅ **No re-encoding**
